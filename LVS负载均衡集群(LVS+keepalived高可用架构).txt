@@ -1,0 +1,288 @@
+
+
+?
+  一、 LVS简介及工作原理:
+
+(LVS是Linux Virtual Server的简写，意即Linux虚拟服务器，是一个虚拟的服务器集群系统本项目在1998年5月由章文嵩博士成立，是中国国内最早出现的自由软件项目之一。)
+
+
+   LVS 简单工作原理：用户请求LVS VIP，LVS根据转发方式和算法，将请求转发给后端服务器，后端服务器接受到请求，返回给用户。对于用户来说，看不到WEB后端具体的应用。
+
+   LVS转发方式有三种，分别是NAT、DR、TUN模式，常用算法：RR、LC、WRR、WLC模式等（RR为轮询模式，LC为最少连接模式）（算法总的有八种）
+**用的最多的是RR：轮询模式（一般后端服务器性能差不多的情况下用轮询比较多）
+**后端的服务器性能差些可以把权重修改小一些WRR请求分配少点
+**后端服务器分配不均，就用LC（分摊）
+
+
+
+二、转发模式详解：
+
+  1）、LVS NAT原理：用户请求LVS到达director,director将请求的报文的目标地址改成后端的realserver地址，同时将报文的目标端口也改成后端选定的realserver相应端口，最后将报文发送到realserver，realserver将数据返给director，director再把数据发送给用户。（两次请求都经过director，所以访问大的话，director会成为瓶颈）
+**用LVS NAT:转发模式的话官方公布后台服务器不能超过20台（节省IP地址，但是性能会成为瓶颈）
+
+
+2）、LVS DR原理：用户请求LVS到达director,director将请求的报文的目标MAC地址改成后端的realserver MAC地址，目标IP为VIP（不变），源IP为用户IP地址（保持不变），然后Director将报文发送到realserver，realserver检测到目标为自己本地IP，如果在同一个网段，然后将请求直接返给用户。如果用户跟realserver不在一个网段，则通过网关返回用户。（此种转发效率最高）
+**LVS DR转发模式：是效率最高的，一般公司都用的这个架构（LVS+Nginx上都绑定了VIP，这么多VIP会有ip冲突：会把真实服务器的arp解析给禁止掉只允许LVS的vip去响应）
+**VIP的IP地址是绑定在本地回环地址上的（本地地址上）
+
+3）、LVS TUN原理：跟LVS DR类似，也是改变封装MAC地址，多了一层隧道加密。实施环境复杂，比LVS DR模式效率略低。（图一为LVS负载均衡图）
+**从LVS到后端服务器是做一层加密
+
+
+**ipvsadm-1.24.tar.gz软件包的版本和系统内核的版本有很大关系一般2.26的内核版本用1.24-1.26都可以
+fullinat最新模式
+
+
+
+三、LVS环境安装配置：
+
+
+下载LVS所需软件ipvsadm-1.2.4.tar.gz软件，编译安装：
+
+
+wget -c  http://www.linuxvirtualserver.org/software/kernel-2.6/ipvsadm-1.24.tar.gz 
+
+ln -s /usr/src/kernels/2.6.* /usr/src/linux    //IPVS模块编译进内核里，需要做软连接
+
+tar xzvf ipvsadm-1.24.tar.gz &&cd ipvsadm-1.24 && make && make install
+
+LVS安装完毕之后，需要进行配置，配置的步骤有两步，第一步为定义端口服务，第二步为添加realserver后端服务。
+
+
+ipvsadm -A -t 192.168.2.188:80 -s rr
+ipvsadm -a -t 192.168.2.188:80 -r 192.168.2.104 -m -w 2
+ipvsadm -a -t 192.168.2.188:80 -r 192.168.2.116 -m -w 2
+
+参数说明：
+
+-A 增加一台虚拟服务器地址。
+
+-t  虚拟服务器提供的是tcp服务。
+
+-s  使用的调度算法。
+
+-a  在虚拟服务器中增加一台后端真实服务器。
+
+-r  指定真实服务器地址。
+
+-m 设置当前转发方式为NAT模式；-g为直接路由模式；-i  模式为隧道模式。
+
+-w 后端真实服务器的权重。
+
+查看LVS转发列表命令为：ipvsadm –Ln
+
+
+ 1）、 我们会发现，如果这台LVS发生突发情况，down机了，那后端所有的应用程序都访问不了。如何避免这种问题呢，这里需要用到故障切换，也就是如果有一台备用的LVS就好了，主down了，自动切换到从，怎么实现这个需求，接下来讲解的keepalived软件就是专门用来做故障检测及切换的。
+
+
+2）、  Keepalived基于三层检测（IP层，TCP层，及应用层），主要用于检测web服务器的状态，如果有一台web服务器死机，或工作出现故障，Keepalived检测到并将有故障的web服务器从系统中剔除；
+
+3）、  当web服务器工作正常后Keepalived自动将web服务器加入到服务器群中，这些工作全部自动完成，不需要人工干涉，需要人工做的只是修复故障的web服务器。
+
+4）、  需要注意一点，如果使用了keepalived.conf配置，就不需要再执行ipvs –A命令去添加均衡的realserver命令了，所有的配置都会在keepalived.conf里面，一个配置文件搞定所有，即只需要安装ipvs模块。
+
+
+
+   我们会发现，如果这台LVS发生突发情况，down机了，那后端所有的应用程序都访问不了。如何避免这种问题呢，这里需要用到故障切换，也就是如果有一台备用的LVS就好了，主down了，自动切换到从，怎么实现这个需求，接下来讲解的keepalived软件就是专门用来做故障检测及切换的。
+
+    Keepalived基于三层检测（IP层，TCP层，及应用层），主要用于检测web服务器的状态，如果有一台web服务器死机，或工作出现故障，Keepalived检测到并将有故障的web服务器从系统中剔除；
+
+    当web服务器工作正常后Keepalived自动将web服务器加入到服务器群中，这些工作全部自动完成，不需要人工干涉，需要人工做的只是修复故障的web服务器。
+
+   需要注意一点，如果使用了keepalived.conf配置，就不需要再执行ipvs –A命令去添加均衡的realserver命令了，所有的配置都会在keepalived.conf里面，一个配置文件搞定所有，即只需要安装ipvs模块。
+
+?	
+
+四、  Keepalived安装配置
+
+官方下载keepalived相应稳定版本：
+
+cd /usr/src ;wget -c  http://www.keepalived.org/software/keepalived-1.1.15.tar.gz 
+
+
+tar -xzvf keepalived-1.1.15.tar.gz &&cd keepalived-1.1.15 && ./configure --with-dir=/usr/src/kernels/ 2.6.32-573.3.1.el6.x86_64  && make && make install
+
+
+安装完毕，配置keepalived服务为系统服务
+
+
+DIR=/usr/local/ cp $DIR/etc/rc.d/init.d/keepalived /etc/rc.d/init.d/ 
+cp $DIR/etc/sysconfig/keepalived /etc/sysconfig/ && mkdir -p /etc/keepalived 
+cp $DIR/sbin/keepalived /usr/sbin/
+
+
+在MASTER上/etc/keepalived/目录创建keepalived.conf配置文件，并写入如下内容：
+
+! Configuration File for keepalived
+ 
+global_defs {
+   notification_email {
+      wgkgood@163.com
+   }
+   notification_email_from wgkgood@163.com
+   smtp_server 127.0.0.1 
+   smtp_connect_timeout 30
+   router_id LVS_DEVEL
+}
+ 
+# VIP1
+vrrp_instance VI_1 {
+    state BACKUP   
+    interface eth0
+    lvs_sync_daemon_inteface eth0
+    virtual_router_id 51
+    priority 100 
+    advert_int 5
+    nopreempt
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        192.168.33.188   
+    }
+}
+ 
+virtual_server 192.168.33.188 80 {
+    delay_loop 6    
+    lb_algo wrr    
+    lb_kind DR   
+#    persistence_timeout 60    
+    protocol TCP         
+ 
+    real_server 192.168.33.12 80 {
+        weight 100        
+        TCP_CHECK {
+        connect_timeout 10 
+        nb_get_retry 3
+        delay_before_retry 3
+        connect_port 80
+        }
+    }
+    real_server 192.168.33.13 80 {
+        weight 100
+        TCP_CHECK {
+        connect_timeout 10
+        nb_get_retry 3
+        delay_before_retry 3
+        connect_port 80
+        
+        }
+    }
+}
+
+
+
+如上配置文件，红色标记的地方需要注意，state状态主服务器设置MASTER，从设置为BACKUP，优先级备机设置比MASTER小，例如设置90，使用TCP端口检测。
+
+
+在LVS BACKUP服务器写入如下配置，需要注意的是客户端的配置要修改优先级及状态：
+
+
+! Configuration Filefor keepalived
+global_defs {
+  notification_email {
+   wgkgood@163.com
+  }
+  notification_email_from wgkgood@163.com
+  smtp_server 127.0.0.1
+  smtp_connect_timeout 30
+  router_id LVS_DEVEL
+}
+# VIP1
+vrrp_instance VI_1 {
+  state BACKUP
+  interface eth0
+  lvs_sync_daemon_inteface eth0
+  virtual_router_id 51
+  priority 90
+  advert_int 5
+  authentication {
+    auth_type PASS
+    auth_pass 1111
+  }
+  virtual_ipaddress {
+    192.168.33.11
+  }
+}
+#REAL_SERVER_1
+virtual_server 192.168.33.11 80 {
+  delay_loop 6
+  lb_algo wlc
+  lb_kind DR
+  persistence_timeout 60
+  protocol TCP
+  real_server 192.168.33.130 80 {
+    weight 100
+    TCP_CHECK {
+    connect_timeout 10
+    nb_get_retry 3
+    delay_before_retry 3
+    connect_port 80
+    }
+}
+#REAL_SERVER_2
+  real_server 192.168.33.131 80 {
+    weight 100
+    TCP_CHECK {
+    connect_timeout 10
+    nb_get_retry 3
+    delay_before_retry 3
+    connect_port 80
+    }
+  }
+}
+
+
+
+
+
+  
+如上设置，LVS 主备配置完毕，接下来需要在realserver配置LVS VIP，为什么要在realserver绑定VIP呢？
+客户端访问director的VIP，director接收请求，将通过相应的算法将请求转发给相应的realserver。在转发的过程中，会修改请求包的目的mac地址，目的ip地址不变。
+
+   Realserver接收请求，并直接响应客户端。这时便出现一个问题，director此时与realserver位于同一个网络中，当director直接将请求转发给realserver时，realserver检测到该请求包的目的ip是vip而并非自己，便会丢弃，而不会响应。为了解决这个问题，所以需要在所有Realserver上都配上VIP。
+为什么一定要配置在lo接口上呢？
+
+  在realserver上的lo口配置VIP,这样限制了VIP不会在物理交换机上产生MAC地址表，从而避免IP冲突。 
+客户端启动Realserver.sh脚本内容：
+
+
+#!/bin/sh
+#LVS Client Server
+
+VIP=192.168.2.188
+#VIP=10.100.1.100
+
+case  $1  in                                                                                                                                                                          
+start)                                                                                                                                          
+    ifconfig lo:0 $VIP netmask 255.255.255.255 broadcast $VIP
+    /sbin/route add -host $VIP dev lo:0
+    echo "1" >/proc/sys/net/ipv4/conf/lo/arp_ignore
+    echo "2" >/proc/sys/net/ipv4/conf/lo/arp_announce
+    echo "1" >/proc/sys/net/ipv4/conf/all/arp_ignore
+    echo "2" >/proc/sys/net/ipv4/conf/all/arp_announce
+    sysctl -p >/dev/null 2>&1
+    echo "RealServer Start OK"
+    exit 0
+;;                                                                                                                                                                                  
+stop)
+    ifconfig lo:0 down
+    route del $VIP >/dev/null 2>&1
+    echo "0" >/proc/sys/net/ipv4/conf/lo/arp_ignore
+    echo "0" >/proc/sys/net/ipv4/conf/lo/arp_announce
+    echo "0" >/proc/sys/net/ipv4/conf/all/arp_ignore
+    echo "0" >/proc/sys/net/ipv4/conf/all/arp_announce
+    echo "RealServer Stoped OK"
+    exit 1
+
+;;
+
+*)
+
+    echo "Usage: $0 {start|stop}"
+
+;;
+
+esac
+
